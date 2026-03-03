@@ -1,0 +1,35 @@
+name: Update api.github.com certificate
+
+on:
+  schedule:
+    - cron: "0 0 6 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-cert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch api.github.com certificate chain
+        run: |
+          mkdir -p cert
+          echo | openssl s_client -connect api.github.com:443 -servername api.github.com -showcerts 2>/dev/null | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > cert/api.github.com.fullchain.pem
+
+      - name: Commit certificate if changed
+        run: |
+          if git diff --quiet -- cert/api.github.com.fullchain.pem; then
+            echo "No certificate changes detected"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cert/api.github.com.fullchain.pem
+          git commit -m "chore: update api.github.com certificate"
+          git push

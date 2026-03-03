@@ -1,2 +1,3 @@
 # fluffy-fiesta
-GitHub's Public Certificate Copies.
+
+This repository only fetches and stores the public TLS certificate chain for `api.github.com`.
