@@ -1,0 +1,126 @@
+name: Track GitHub Meta API changes
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Every Monday at 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check-meta:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch live meta
+        run: |
+          curl -sf https://api.github.com/meta | jq --sort-keys '.' > /tmp/live-meta.json
+
+      - name: Compare with stored meta
+        id: diff
+        run: |
+          STORED="meta/api.github.com.meta.json"
+
+          if [[ ! -f "$STORED" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "first_run=true" >> "$GITHUB_OUTPUT"
+            echo "No stored meta found — first run."
+            exit 0
+          fi
+
+          # Sort stored copy consistently
+          jq --sort-keys '.' "$STORED" > /tmp/stored-meta.json
+
+          if diff -u /tmp/stored-meta.json /tmp/live-meta.json > /tmp/meta-diff.txt 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes detected."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+
+            # Build a human-readable summary of what changed
+            {
+              echo 'SUMMARY<<EOF'
+
+              for key in $(jq -r 'keys[]' /tmp/live-meta.json); do
+                STORED_VAL=$(jq -r --arg k "$key" '.[$k]' /tmp/stored-meta.json 2>/dev/null)
+                LIVE_VAL=$(jq -r --arg k "$key" '.[$k]' /tmp/live-meta.json 2>/dev/null)
+                if [[ "$STORED_VAL" != "$LIVE_VAL" ]]; then
+                  if echo "$STORED_VAL" | jq -e 'type == "array"' > /dev/null 2>&1; then
+                    ADDED=$(jq -n --argjson a "$LIVE_VAL" --argjson b "$STORED_VAL" '$a - $b | length')
+                    REMOVED=$(jq -n --argjson a "$STORED_VAL" --argjson b "$LIVE_VAL" '$a - $b | length')
+                    echo "- **$key**: $ADDED added, $REMOVED removed"
+                  else
+                    echo "- **$key**: value changed"
+                  fi
+                fi
+              done
+
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update stored meta
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          mkdir -p meta
+          cp /tmp/live-meta.json meta/api.github.com.meta.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add meta/api.github.com.meta.json
+          git commit -m "chore: update api.github.com meta snapshot"
+          git push
+
+      - name: Generate diff for issue body
+        if: steps.diff.outputs.changed == 'true' && steps.diff.outputs.first_run != 'true'
+        id: diffbody
+        run: |
+          # Truncate diff if it's too large for an issue body
+          DIFF=$(head -c 60000 /tmp/meta-diff.txt)
+          {
+            echo 'DIFF<<EOF'
+            echo "$DIFF"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create issue for meta change
+        if: steps.diff.outputs.changed == 'true' && steps.diff.outputs.first_run != 'true'
+        uses: actions/github-script@v7
+        env:
+          SUMMARY: ${{ steps.diff.outputs.SUMMARY }}
+          DIFF: ${{ steps.diffbody.outputs.DIFF }}
+        with:
+          script: |
+            const now = new Date().toISOString().split('T')[0];
+            const summary = process.env.SUMMARY || '_No summary available._';
+            const diff = process.env.DIFF || '_Diff too large to display._';
+
+            const body = [
+              `## GitHub Meta API Change Detected — ${now}`,
+              '',
+              'The response from \`https://api.github.com/meta\` has changed since the last snapshot.',
+              '',
+              '### Summary',
+              summary,
+              '',
+              '### Diff',
+              '```diff',
+              diff,
+              '```',
+              '',
+              '---',
+              '_Reported by the weekly meta change tracking workflow._',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `meta: api.github.com/meta changed (${now})`,
+              body: body,
+              labels: ['meta-change']
+            });
